@@ -21,7 +21,7 @@
 
 #define LWS_DLL
 #define LWS_INTERNAL
-#include "../lib/libwebsockets.h"
+#include <libwebsockets.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -76,7 +76,8 @@ md5_to_hex_cstr(char *md5_hex_33, const unsigned char *md5)
 int avatar(void *avatar_arg, const unsigned char *md5)
 {
 	struct vhd_gitws *vhd = (struct vhd_gitws *)avatar_arg;
-	typedef int (*mention_t)(const struct lws_protocols *pcol, struct lws_vhost *vh, const char *path);
+	typedef int (*mention_t)(const struct lws_protocols *pcol,
+			struct lws_vhost *vh, const char *path);
 	char md[256];
 
 	if (!vhd->cache_protocol)
@@ -92,6 +93,21 @@ int avatar(void *avatar_arg, const unsigned char *md5)
 
 	((mention_t)(void *)vhd->cache_protocol->user)
 			(vhd->cache_protocol, vhd->vhost, md);
+
+	return 0;
+}
+
+static int
+get_pvo_gitws(void *in, const char *name, const char **result)
+{
+	const struct lws_protocol_vhost_options *pv =
+		lws_pvo_search((const struct lws_protocol_vhost_options *)in,
+				name);
+
+	if (!pv)
+		return 1;
+
+	*result = (const char *)pv->value;
 
 	return 0;
 }
@@ -127,21 +143,18 @@ callback_gitws(struct lws *wsi, enum lws_callback_reasons reason,
 
 		vhd->vhost = lws_get_vhost(wsi);
 
-		vhd->html = lws_pvo_search(
-				(const struct lws_protocol_vhost_options *)in,
-				"html-file")->value;
-		vhd->vpath = lws_pvo_search(
-				(const struct lws_protocol_vhost_options *)in,
-				"vpath")->value;
-		vhd->repo_base_dir = lws_pvo_search(
-				(const struct lws_protocol_vhost_options *)in,
-				"repo-base-dir")->value;
-		vhd->acl_user = lws_pvo_search(
-				(const struct lws_protocol_vhost_options *)in,
-				"acl-user")->value;
-		vhd->avatar_url = lws_pvo_search(
-				(const struct lws_protocol_vhost_options *)in,
-				"avatar-url")->value;
+		if (get_pvo_gitws(in, "html-file", &vhd->html) ||
+		    get_pvo_gitws(in, "vpath", &vhd->vpath) ||
+		    get_pvo_gitws(in, "repo-base-dir", &vhd->repo_base_dir) ||
+		    get_pvo_gitws(in, "acl-user", &vhd->acl_user) ||
+		    get_pvo_gitws(in, "avatar-url", &vhd->avatar_url)) {
+
+			lwsl_err("%s: required pvos: html-file, vpath,"
+				 "repo-base-dir, acl-user, avatar-url\n",
+				 __func__);
+
+			return -1;
+		}
 
 		memset(&config, 0, sizeof(config));
 		config.virtual_base_urlpath = vhd->vpath;
@@ -176,99 +189,6 @@ callback_gitws(struct lws *wsi, enum lws_callback_reasons reason,
 						LWS_CALLBACK_USER, 3);
 		break;
 
-#if 0
-	/* --------------- ws --------------- */
-
-	case LWS_CALLBACK_ESTABLISHED:
-		lwsl_notice("%s: LWS_CALLBACK_ESTABLISHED\n", __func__);
-
-		p = start;
-		lws_hdr_copy(wsi, (char *)p, end - p, WSI_TOKEN_GET_URI);
-
-		if (!strncmp((char *)p, vhd->vpath, strlen(vhd->vpath))) {
-			p += strlen(vhd->vpath);
-			start += strlen(vhd->vpath);
-		}
-
-		p += strlen((char *)p);
-
-		n = 0;
-		while (lws_hdr_copy_fragment(wsi, (char *)p + 1, end - p - 2,
-					     WSI_TOKEN_HTTP_URI_ARGS, n) > 0) {
-			if (!n)
-				*p = '?';
-			else
-				*p = '&';
-
-			p += strlen((char *)p);
-			n++;
-		}
-
-		if (jg2_ctx_create(vhd->jg2_vhost, &pss->ctx,
-				   (const char *)start, 0,
-				   &mimetype, &length, NULL, pss)) {
-			lwsl_err("%s: jg2_ctx_create fail\n", __func__);
-			return -1;
-		}
-
-		pss->wsi = wsi;
-		break;
-
-	case LWS_CALLBACK_CLOSED:
-		lwsl_debug("%s: LWS_CALLBACK_CLOSED\n", __func__);
-		jg2_ctx_destroy(pss->ctx);
-		break;
-
-	case LWS_CALLBACK_RECEIVE:
-		/*
-		 * 		pss->state = EMIT_STATE_SUMMARY;
-		jg2_ctx_set_job(pss->ctx, jg2_get_job(JG2_JOB_REFLIST),
-				     NULL, 0, 0);
-		lws_callback_on_writable(wsi);
-		 */
-		break;
-
-	case LWS_CALLBACK_SERVER_WRITEABLE:
-
-		if (!jg2_ctx_get_job(pss->ctx))
-			break;
-
-		partway = jg2_ctx_is_partway(pss->ctx);
-
-		m = jg2_ctx_get_job(pss->ctx)(pss->ctx, &buf[LWS_PRE],
-				     sizeof(buf) - LWS_PRE);
-		if (m < 0)
-			return -1;
-
-		if (lws_write(wsi, (unsigned char *)&buf[LWS_PRE],
-			      jg2_ctx_buf_used(pss->ctx),
-			      lws_write_ws_flags(LWS_WRITE_TEXT, !partway,
-					jg2_ctx_is_final(pss->ctx))) < 0) {
-			lwsl_err("write failed: %d %d\n",
-				 jg2_ctx_buf_used(pss->ctx),
-				 lws_write_ws_flags(LWS_WRITE_TEXT, !partway,
-					jg2_ctx_is_final(pss->ctx)));
-			return -1;
-		}
-
-		if (m)
-			lws_callback_on_writable(wsi);
-		else {
-			switch (pss->state) {
-			case EMIT_STATE_SUMMARY:
-				pss->state = EMIT_STATE_SUMMARY_LOG;
-				jg2_ctx_set_job(pss->ctx,
-						jg2_get_job(JG2_JOB_LOG),
-						     "refs/heads/master", 10, 1);
-				lws_callback_on_writable(wsi);
-				break;
-			default:
-				break;
-			}
-		}
-		break;
-#endif
-
 	/* --------------- http --------------- */
 
 	case LWS_CALLBACK_HTTP:
@@ -293,8 +213,10 @@ callback_gitws(struct lws *wsi, enum lws_callback_reasons reason,
 			p += len;
 
 			n = 0;
-			while (lws_hdr_copy_fragment(wsi, (char *)p + 1, end - p - 2,
-						     WSI_TOKEN_HTTP_URI_ARGS, n) > 0) {
+			while (lws_hdr_copy_fragment(wsi, (char *)p + 1,
+						     end - p - 2,
+						     WSI_TOKEN_HTTP_URI_ARGS,
+						     n) > 0) {
 				if (!n)
 					*p = '?';
 				else
@@ -310,7 +232,8 @@ callback_gitws(struct lws *wsi, enum lws_callback_reasons reason,
 		if (jg2_ctx_create(vhd->jg2_vhost, &pss->ctx,
 				   (const char *)start, JG2_CTX_FLAG_HTML,
 				   &mimetype, &length, NULL, NULL)) {
-			lwsl_err("%s: jg2_ctx_create fail\n", __func__);
+			lwsl_err("%s: jg2_ctx_create fail: %s\n", __func__,
+					start);
 			return -1;
 		}
 
@@ -329,7 +252,8 @@ callback_gitws(struct lws *wsi, enum lws_callback_reasons reason,
 
 	case LWS_CALLBACK_CLOSED_HTTP:
 		lwsl_debug("%s: LWS_CALLBACK_CLOSED_HTTP\n", __func__);
-		jg2_ctx_destroy(pss->ctx);
+		if (pss)
+			jg2_ctx_destroy(pss->ctx);
 		return 0;
 
 	case LWS_CALLBACK_HTTP_WRITEABLE:
@@ -364,13 +288,18 @@ callback_gitws(struct lws *wsi, enum lws_callback_reasons reason,
 	return lws_callback_http_dummy(wsi, reason, user, in, len);
 }
 
+#define LWS_PLUGIN_PROTOCOL_LWS_GITWS \
+	{ \
+		"lws-gitws", \
+		callback_gitws, \
+		sizeof(struct pss_gitws), \
+		4096, \
+	}
+
+#if !defined (LWS_PLUGIN_STATIC)
+
 static const struct lws_protocols protocols[] = {
-	{
-		"lws-gitws",
-		callback_gitws,
-		sizeof(struct pss_gitws),
-		4096,
-	},
+	LWS_PLUGIN_PROTOCOL_LWS_GITWS
 };
 
 LWS_EXTERN LWS_VISIBLE int
@@ -396,3 +325,4 @@ destroy_protocol_gitws(struct lws_context *context)
 {
 	return 0;
 }
+#endif
